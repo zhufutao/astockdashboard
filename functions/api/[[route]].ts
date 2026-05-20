@@ -41,6 +41,11 @@ type Indicator = {
 const app = new Hono<{ Bindings: Env; Variables: { user: User | null } }>().basePath("/api");
 type AppContext = Context<{ Bindings: Env; Variables: { user: User | null } }>;
 
+app.onError((error, c) => {
+  console.error(error);
+  return c.json({ error: "服务暂时不可用", detail: error instanceof Error ? error.message : String(error) }, 500);
+});
+
 const defaultIndicators = [
   ["jisilu-temp", "集思录 A 股温度计", "估值温度", "用集思录市场温度观察全市场估值所处位置。", 12, "pending", "集思录", "https://www.jisilu.cn/data/indicator/12", "接近/达标阈值建议以后用历史温度分位校准。", 80, 90, "gte", null, "待接入：公开页面可看，自动抓取稳定性待验证。", "pending", 0, 10],
   ["all-a-pe-pb", "全 A PE / PB 分位", "估值温度", "观察全市场估值是否处于历史高分位。", 8, "manual", "手动配置/后续接入可靠行情源", null, "建议以过去 5-10 年历史分位，80% 接近、90% 达标。", 80, 90, "gte", null, "待手动录入或接入可靠数据源。", "manual", 0, 20],
@@ -372,8 +377,9 @@ function publicUser(user: User) {
 async function hashPassword(password: string) {
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
-  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt, iterations: 120000, hash: "SHA-256" }, key, 256);
-  return `pbkdf2$120000$${base64(salt)}$${base64(new Uint8Array(bits))}`;
+  const iterations = 100000;
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt, iterations, hash: "SHA-256" }, key, 256);
+  return `pbkdf2$${iterations}$${base64(salt)}$${base64(new Uint8Array(bits))}`;
 }
 
 async function verifyPassword(password: string, stored: string) {
