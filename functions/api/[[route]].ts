@@ -133,6 +133,7 @@ app.get("/auth/me", (c) => {
 app.get("/dashboard", async (c) => {
   const user = requireUser(c);
   if (user instanceof Response) return user;
+  await refreshAutoIndicators(c.env.DB);
   const indicators = await listIndicators(c.env.DB);
   return c.json(buildDashboard(indicators));
 });
@@ -149,6 +150,7 @@ app.get("/strategy/btc", async (c) => {
 app.get("/admin/indicators", async (c) => {
   const admin = requireAdmin(c);
   if (admin instanceof Response) return admin;
+  await refreshAutoIndicators(c.env.DB);
   return c.json({ indicators: await listIndicators(c.env.DB, false) });
 });
 
@@ -331,6 +333,167 @@ async function getBtcRealtime(db: D1Database) {
       .run();
     return { source: "Binance BTCUSDT 日线", error: "实时数据获取失败", message, updatedAt: new Date().toISOString() };
   }
+}
+
+async function refreshAutoIndicators(db: D1Database) {
+  const tasks = [refreshJisiluTemperature(db), refreshIndexMaBreaks(db)];
+  const results = await Promise.allSettled(tasks);
+  for (const result of results) {
+    if (result.status === "rejected") {
+      await logFetch(db, "auto-indicators", "failed", result.reason instanceof Error ? result.reason.message : String(result.reason));
+    }
+  }
+}
+
+async function refreshJisiluTemperature(db: D1Database) {
+  const response = await fetch("https://www.jisilu.cn/data/indicator/12", {
+    headers: { "User-Agent": "Mozilla/5.0 manfu-dashboard/0.1" }
+  });
+  if (!response.ok) throw new Error(`集思录温度计 HTTP ${response.status}`);
+  const html = await response.text();
+  const parsed = parseJisiluTemperature(html);
+  const text = `${parsed.date} PB温度${parsed.pbTemp.toFixed(2)} 中值${parsed.pbMedian.toFixed(2)}；PE温度${parsed.peTemp.toFixed(2)} 收益率中值${parsed.peYield.toFixed(2)}%；国债收益率${parsed.baseYtm.toFixed(2)}%`;
+  await updateIndicatorAuto(db, "jisilu-temp", {
+    sourceType: "auto",
+    sourceName: "集思录 A股全市场温度计",
+    sourceUrl: "https://www.jisilu.cn/data/indicator/12",
+    value: parsed.pbTemp,
+    text,
+    status: thresholdStatus(parsed.pbTemp, 80, 90, "gte"),
+    contribution: null,
+    thresholdNote: "集思录说明：PB/PE中值基于扣除停牌股、1年内新股、ST等后的全市场中位数；温度为当前中值在历史序列中的百分位。当前以 PB温度 80/90 作为接近/达标阈值。"
+  });
+  const valuationTemp = Math.max(parsed.pbTemp, parsed.peTemp);
+  await updateIndicatorAuto(db, "all-a-pe-pb", {
+    sourceType: "auto",
+    sourceName: "集思录 A股全市场温度计",
+    sourceUrl: "https://www.jisilu.cn/data/indicator/12",
+    value: valuationTemp,
+    text: `${parsed.date} PB中值${parsed.pbMedian.toFixed(2)}，PB温度${parsed.pbTemp.toFixed(2)}；PE收益率中值${parsed.peYield.toFixed(2)}%，PE温度${parsed.peTemp.toFixed(2)}`,
+    status: thresholdStatus(valuationTemp, 80, 90, "gte"),
+    contribution: null,
+    thresholdNote: "使用集思录全市场 PB温度与 PE温度的较高值作为估值热度代表，80/90 为接近/达标。"
+  });
+  const spread = parsed.peYield - parsed.baseYtm;
+  await updateIndicatorAuto(db, "erp", {
+    sourceType: "auto",
+    sourceName: "集思录 A股全市场温度计",
+    sourceUrl: "https://www.jisilu.cn/data/indicator/12",
+    value: spread,
+    text: `${parsed.date} PE收益率中值${parsed.peYield.toFixed(2)}% - 国债收益率${parsed.baseYtm.toFixed(2)}% = ${spread.toFixed(2)}%`,
+    status: "not_hit",
+    contribution: 0,
+    thresholdNote: "自动展示股债收益差。该指标方向为越低越危险，正式达标阈值需后续按历史分位校准；当前不贡献顶部评分。"
+  });
+  await logFetch(db, "jisilu-temperature", "ok", text);
+}
+
+async function refreshIndexMaBreaks(db: D1Database) {
+  const indexes = [
+    { name: "上证指数", symbol: "sh000001" },
+    { name: "沪深300", symbol: "sh000300" },
+    { name: "中证500", symbol: "sh000905" },
+    { name: "创业板指", symbol: "sz399006" }
+  ];
+  const rows = await Promise.all(indexes.map(async (item) => {
+    const url = `https://web.ifzq.gtimg.cn/appstock/app/kline/kline?param=${item.symbol},day,,,80`;
+    const response = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0 manfu-dashboard/0.1" } });
+    if (!response.ok) throw new Error(`腾讯证券 K线 HTTP ${response.status}`);
+    const json = await response.json() as { data?: Record<string, { day?: string[][] }> };
+    const klines = json.data?.[item.symbol]?.day ?? [];
+    if (klines.length < 60) throw new Error(`${item.name} K线不足 60 条`);
+    const closes = klines.map((line) => Number(line[2]));
+    const close = closes.at(-1) ?? 0;
+    const ma20 = average(closes.slice(-20));
+    const ma60 = average(closes.slice(-60));
+    return { ...item, date: klines.at(-1)?.[0] ?? "", close, ma20, ma60, below20: close < ma20, below60: close < ma60 };
+  }));
+  const below20 = rows.filter((item) => item.below20).length;
+  const below60 = rows.filter((item) => item.below60).length;
+  const status = below20 >= 3 || below60 >= 2 ? "hit" : below20 >= 2 || below60 >= 1 ? "near" : "not_hit";
+  const text = `${rows[0]?.date ?? ""} MA20下方${below20}/4，MA60下方${below60}/4；${rows.map((item) => `${item.name}${item.below20 ? "破MA20" : "在MA20上"}${item.below60 ? "/破MA60" : ""}`).join("，")}`;
+  await updateIndicatorAuto(db, "ma-breaks", {
+    sourceType: "auto",
+    sourceName: "腾讯证券指数日 K 线",
+    sourceUrl: "https://gu.qq.com/",
+    value: below20,
+    text,
+    status,
+    contribution: null,
+    thresholdNote: "自动跟踪上证指数、沪深300、中证500、创业板指：2 个指数跌破 MA20 或 1 个跌破 MA60 为接近，3 个跌破 MA20 或 2 个跌破 MA60 为达标。"
+  });
+  await logFetch(db, "tencent-index-ma", "ok", text);
+}
+
+function parseJisiluTemperature(html: string) {
+  const dates = parseStringArray(html, "__date");
+  const pbMedian = last(parseNumberArray(html, "median_PB"));
+  const pbTemp = last(parseNumberArray(html, "median_PB_t"));
+  const peYield = last(parseNumberArray(html, "median_PE"));
+  const peTemp = last(parseNumberArray(html, "median_PE_t"));
+  const baseYtm = last(parseNumberArray(html, "base_ytm"));
+  const date = dates.at(-1);
+  if (!date || [pbMedian, pbTemp, peYield, peTemp, baseYtm].some((item) => !Number.isFinite(item))) {
+    throw new Error("集思录温度计数据解析失败");
+  }
+  return { date, pbMedian, pbTemp, peYield, peTemp, baseYtm };
+}
+
+function parseNumberArray(html: string, key: string) {
+  const match = html.match(new RegExp(`${key}:\\s*\\[([^\\]]+)\\]`));
+  if (!match) return [];
+  return match[1].split(",").map((item) => Number(item.trim())).filter((item) => Number.isFinite(item));
+}
+
+function parseStringArray(html: string, key: string) {
+  const match = html.match(new RegExp(`var ${key}\\s*=\\s*\\[([^\\]]+)\\]`));
+  if (!match) return [];
+  return Array.from(match[1].matchAll(/'([^']+)'/g)).map((item) => item[1]);
+}
+
+function last(values: number[]) {
+  return values[values.length - 1];
+}
+
+function average(values: number[]) {
+  return values.reduce((sum, item) => sum + item, 0) / values.length;
+}
+
+async function updateIndicatorAuto(db: D1Database, id: string, data: {
+  sourceType: "auto" | "manual" | "pending";
+  sourceName: string;
+  sourceUrl: string | null;
+  value: number | null;
+  text: string;
+  status: Indicator["status"];
+  contribution: number | null;
+  thresholdNote: string;
+}) {
+  const indicator = await db.prepare("SELECT weight FROM indicators WHERE id = ?").bind(id).first<{ weight: number }>();
+  if (!indicator) return;
+  const contribution = data.contribution ?? statusScore(data.status, Number(indicator.weight));
+  await db.prepare(`
+    UPDATE indicators SET source_type = ?, source_name = ?, source_url = ?, current_value = ?, current_text = ?,
+    status = ?, contribution = ?, threshold_note = ?, last_updated = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).bind(data.sourceType, data.sourceName, data.sourceUrl, data.value, data.text, data.status, contribution, data.thresholdNote, id).run();
+}
+
+function thresholdStatus(value: number, near: number, hit: number, direction: "gte" | "lte"): Indicator["status"] {
+  if (direction === "gte") {
+    if (value >= hit) return "hit";
+    if (value >= near) return "near";
+    return "not_hit";
+  }
+  if (value <= hit) return "hit";
+  if (value <= near) return "near";
+  return "not_hit";
+}
+
+async function logFetch(db: D1Database, source: string, status: string, message: string) {
+  await db.prepare("INSERT INTO data_fetch_logs (source, status, message) VALUES (?, ?, ?)")
+    .bind(source, status, message.slice(0, 500))
+    .run();
 }
 
 function statusScore(status: string, weight: number) {
