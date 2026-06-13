@@ -712,6 +712,18 @@ function inferAssetStyle(asset: FoundationAsset, analysisJson: Record<string, un
     analysisJson.valuation_method,
     analysisJson.price_band_method
   );
+  const explicitStyle = [
+    "QDII/互联网",
+    "宽基ETF",
+    "主题ETF",
+    "周期/资源",
+    "制造/设备",
+    "成长",
+    "金融",
+    "高股息",
+    "港美/中概"
+  ].find((style) => explicit.includes(style));
+  if (explicitStyle) return explicitStyle;
   const text = `${explicit} ${asset.name} ${asset.market} ${asset.analysis_markdown}`.toLowerCase();
   if (asset.asset_type === "etf") {
     if (/qdii|港股|美股|海外|中概|互联网/.test(text)) return "QDII/互联网";
