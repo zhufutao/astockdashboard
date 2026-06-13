@@ -38,8 +38,76 @@ type Indicator = {
   sort_order: number;
 };
 
+type FoundationAssetType = "stock" | "etf" | "other";
+type FoundationConclusion = "不碰" | "只观察" | "等回调" | "低位分批" | "已具备较好安全边际";
+
+type FoundationAsset = {
+  id: string;
+  asset_type: FoundationAssetType;
+  name: string;
+  code: string;
+  market: string;
+  enabled: number;
+  sort_order: number;
+  current_price: number | null;
+  price_source: string | null;
+  price_status: "pending" | "ok" | "failed" | "manual";
+  price_error: string | null;
+  price_updated_at: string | null;
+  no_chase_min: number | null;
+  observe_min: number | null;
+  observe_max: number | null;
+  reasonable_min: number | null;
+  reasonable_max: number | null;
+  safe_min: number | null;
+  safe_max: number | null;
+  bargain_min: number | null;
+  bargain_max: number | null;
+  stop_loss: number | null;
+  reduce_min: number | null;
+  reduce_max: number | null;
+  sell_min: number | null;
+  sell_max: number | null;
+  keep_min: number | null;
+  conclusion: FoundationConclusion;
+  analysis_markdown: string;
+  analysis_json: string;
+  analysis_updated_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 const app = new Hono<{ Bindings: Env; Variables: { user: User | null } }>().basePath("/api");
 type AppContext = Context<{ Bindings: Env; Variables: { user: User | null } }>;
+
+const foundationAssetSchema = z.object({
+  asset_type: z.enum(["stock", "etf", "other"]),
+  name: z.string().min(1),
+  code: z.string().min(1),
+  market: z.string().min(1).default("A股"),
+  enabled: z.boolean().default(true),
+  sort_order: z.number().int().default(0),
+  current_price: z.number().nullable().optional(),
+  no_chase_min: z.number().nullable().optional(),
+  observe_min: z.number().nullable().optional(),
+  observe_max: z.number().nullable().optional(),
+  reasonable_min: z.number().nullable().optional(),
+  reasonable_max: z.number().nullable().optional(),
+  safe_min: z.number().nullable().optional(),
+  safe_max: z.number().nullable().optional(),
+  bargain_min: z.number().nullable().optional(),
+  bargain_max: z.number().nullable().optional(),
+  stop_loss: z.number().nullable().optional(),
+  reduce_min: z.number().nullable().optional(),
+  reduce_max: z.number().nullable().optional(),
+  sell_min: z.number().nullable().optional(),
+  sell_max: z.number().nullable().optional(),
+  keep_min: z.number().nullable().optional(),
+  conclusion: z.string().min(1).default("只观察"),
+  analysis_markdown: z.string().default(""),
+  analysis_json: z.string().default("{}"),
+  analysis_updated_at: z.string().nullable().optional()
+});
 
 app.onError((error, c) => {
   console.error(error);
@@ -147,6 +215,31 @@ app.get("/strategy/btc", async (c) => {
   return c.json({ ...strategy, content: JSON.parse(strategy.content_json), realtime });
 });
 
+app.get("/foundation", async (c) => {
+  const user = requireUser(c);
+  if (user instanceof Response) return user;
+  const settings = await getFoundationSettings(c.env.DB);
+  const assets = await listFoundationAssets(c.env.DB, true);
+  return c.json({ settings, assets: assets.map((asset) => formatFoundationAsset(asset)) });
+});
+
+app.post("/foundation/prices", async (c) => {
+  const user = requireUser(c);
+  if (user instanceof Response) return user;
+  await refreshFoundationPrices(c.env.DB);
+  const settings = await getFoundationSettings(c.env.DB);
+  const assets = await listFoundationAssets(c.env.DB, true);
+  return c.json({ settings, assets: assets.map((asset) => formatFoundationAsset(asset)) });
+});
+
+app.get("/foundation/assets/:id", async (c) => {
+  const user = requireUser(c);
+  if (user instanceof Response) return user;
+  const asset = await getFoundationAsset(c.env.DB, c.req.param("id"));
+  if (!asset || !asset.enabled) return c.json({ error: "标的不存在" }, 404);
+  return c.json({ asset: formatFoundationAsset(asset, true) });
+});
+
 app.get("/admin/indicators", async (c) => {
   const admin = requireAdmin(c);
   if (admin instanceof Response) return admin;
@@ -198,6 +291,60 @@ app.put(
   }
 );
 
+app.get("/admin/foundation", async (c) => {
+  const admin = requireAdmin(c);
+  if (admin instanceof Response) return admin;
+  const settings = await getFoundationSettings(c.env.DB);
+  const assets = await listFoundationAssets(c.env.DB, false);
+  return c.json({ settings, assets: assets.map((item) => formatFoundationAsset(item, true)) });
+});
+
+app.put(
+  "/admin/foundation/settings",
+  zValidator("json", z.object({ refresh_seconds: z.number().int().min(5).max(3600) })),
+  async (c) => {
+    const admin = requireAdmin(c);
+    if (admin instanceof Response) return admin;
+    const { refresh_seconds } = c.req.valid("json");
+    await c.env.DB.prepare("INSERT INTO foundation_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP")
+      .bind("refresh_seconds", String(refresh_seconds))
+      .run();
+    return c.json({ ok: true, settings: await getFoundationSettings(c.env.DB) });
+  }
+);
+
+app.post(
+  "/admin/foundation/assets",
+  zValidator("json", foundationAssetSchema),
+  async (c) => {
+    const admin = requireAdmin(c);
+    if (admin instanceof Response) return admin;
+    const data = c.req.valid("json");
+    const id = slugifyAsset(data.code, data.market);
+    await upsertFoundationAsset(c.env.DB, id, data);
+    return c.json({ ok: true, asset: formatFoundationAsset((await getFoundationAsset(c.env.DB, id))!, true) }, 201);
+  }
+);
+
+app.put(
+  "/admin/foundation/assets/:id",
+  zValidator("json", foundationAssetSchema),
+  async (c) => {
+    const admin = requireAdmin(c);
+    if (admin instanceof Response) return admin;
+    const id = c.req.param("id");
+    await upsertFoundationAsset(c.env.DB, id, c.req.valid("json"));
+    return c.json({ ok: true, asset: formatFoundationAsset((await getFoundationAsset(c.env.DB, id))!, true) });
+  }
+);
+
+app.delete("/admin/foundation/assets/:id", async (c) => {
+  const admin = requireAdmin(c);
+  if (admin instanceof Response) return admin;
+  await c.env.DB.prepare("DELETE FROM foundation_assets WHERE id = ?").bind(c.req.param("id")).run();
+  return c.json({ ok: true });
+});
+
 app.get("/admin/users", async (c) => {
   const admin = requireAdmin(c);
   if (admin instanceof Response) return admin;
@@ -240,6 +387,8 @@ app.get("/admin/logs", async (c) => {
 export const onRequest: PagesFunction<Env> = (context) => app.fetch(context.request, context.env, context as unknown as ExecutionContext);
 
 async function ensureSeed(db: D1Database) {
+  await ensureCoreSchema(db);
+  await ensureFoundationSchema(db);
   const admin = await db.prepare("SELECT id FROM users WHERE email = ?").bind("admin@666.com").first();
   if (!admin) {
     await db.prepare("INSERT INTO users (email, name, password_hash, role) VALUES (?, ?, ?, ?)")
@@ -298,6 +447,344 @@ function buildDashboard(indicators: Awaited<ReturnType<typeof listIndicators>>) 
     failedCount: active.filter((item) => item.status === "failed").length,
     indicators: active
   };
+}
+
+async function ensureCoreSchema(db: D1Database) {
+  await db.batch([
+    db.prepare(`
+      CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL CHECK (role IN ('admin', 'user')),
+        disabled INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `),
+    db.prepare(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      )
+    `),
+    db.prepare(`
+      CREATE TABLE IF NOT EXISTS indicators (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        category TEXT NOT NULL,
+        description TEXT NOT NULL,
+        weight REAL NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        source_type TEXT NOT NULL CHECK (source_type IN ('auto', 'manual', 'pending')),
+        source_name TEXT NOT NULL,
+        source_url TEXT,
+        threshold_note TEXT NOT NULL,
+        near_threshold REAL,
+        hit_threshold REAL,
+        direction TEXT NOT NULL CHECK (direction IN ('gte', 'lte', 'boolean_count')),
+        current_value REAL,
+        current_text TEXT,
+        status TEXT NOT NULL CHECK (status IN ('not_hit', 'near', 'hit', 'pending', 'manual', 'failed')),
+        contribution REAL NOT NULL DEFAULT 0,
+        last_updated TEXT,
+        history_json TEXT NOT NULL DEFAULT '[]',
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `),
+    db.prepare(`
+      CREATE TABLE IF NOT EXISTS strategies (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        source_note TEXT NOT NULL,
+        content_json TEXT NOT NULL,
+        realtime_enabled INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `),
+    db.prepare(`
+      CREATE TABLE IF NOT EXISTS data_fetch_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source TEXT NOT NULL,
+        status TEXT NOT NULL,
+        message TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `)
+  ]);
+}
+
+async function ensureFoundationSchema(db: D1Database) {
+  await db.batch([
+    db.prepare(`
+      CREATE TABLE IF NOT EXISTS foundation_assets (
+        id TEXT PRIMARY KEY,
+        asset_type TEXT NOT NULL CHECK (asset_type IN ('stock', 'etf', 'other')),
+        name TEXT NOT NULL,
+        code TEXT NOT NULL,
+        market TEXT NOT NULL DEFAULT 'A股',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        current_price REAL,
+        price_source TEXT,
+        price_status TEXT NOT NULL DEFAULT 'pending' CHECK (price_status IN ('pending', 'ok', 'failed', 'manual')),
+        price_error TEXT,
+        price_updated_at TEXT,
+        no_chase_min REAL,
+        observe_min REAL,
+        observe_max REAL,
+        reasonable_min REAL,
+        reasonable_max REAL,
+        safe_min REAL,
+        safe_max REAL,
+        bargain_min REAL,
+        bargain_max REAL,
+        stop_loss REAL,
+        reduce_min REAL,
+        reduce_max REAL,
+        sell_min REAL,
+        sell_max REAL,
+        keep_min REAL,
+        conclusion TEXT NOT NULL DEFAULT '只观察',
+        analysis_markdown TEXT NOT NULL DEFAULT '',
+        analysis_json TEXT NOT NULL DEFAULT '{}',
+        analysis_updated_at TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(code, market)
+      )
+    `),
+    db.prepare(`
+      CREATE TABLE IF NOT EXISTS foundation_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `),
+    db.prepare("INSERT OR IGNORE INTO foundation_settings (key, value) VALUES ('refresh_seconds', '15')")
+  ]);
+}
+
+async function getFoundationSettings(db: D1Database) {
+  const { results } = await db.prepare("SELECT key, value FROM foundation_settings").all<{ key: string; value: string }>();
+  const map = Object.fromEntries(results.map((item) => [item.key, item.value]));
+  return { refresh_seconds: Math.max(5, Number(map.refresh_seconds ?? 15) || 15) };
+}
+
+async function listFoundationAssets(db: D1Database, enabledOnly: boolean) {
+  const { results } = await db.prepare(`SELECT * FROM foundation_assets ${enabledOnly ? "WHERE enabled = 1" : ""} ORDER BY asset_type, sort_order, id`).all<FoundationAsset>();
+  return results;
+}
+
+async function getFoundationAsset(db: D1Database, id: string) {
+  return db.prepare("SELECT * FROM foundation_assets WHERE id = ?").bind(id).first<FoundationAsset>();
+}
+
+async function upsertFoundationAsset(db: D1Database, id: string, data: z.infer<typeof foundationAssetSchema>) {
+  const priceStatus = data.current_price === undefined ? "pending" : "manual";
+  await db.prepare(`
+    INSERT INTO foundation_assets (
+      id, asset_type, name, code, market, enabled, sort_order, current_price, price_status, price_updated_at,
+      no_chase_min, observe_min, observe_max, reasonable_min, reasonable_max, safe_min, safe_max,
+      bargain_min, bargain_max, stop_loss, reduce_min, reduce_max, sell_min, sell_max, keep_min,
+      conclusion, analysis_markdown, analysis_json, analysis_updated_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(id) DO UPDATE SET
+      asset_type = excluded.asset_type,
+      name = excluded.name,
+      code = excluded.code,
+      market = excluded.market,
+      enabled = excluded.enabled,
+      sort_order = excluded.sort_order,
+      current_price = COALESCE(excluded.current_price, foundation_assets.current_price),
+      price_status = CASE WHEN excluded.current_price IS NULL THEN foundation_assets.price_status ELSE excluded.price_status END,
+      no_chase_min = excluded.no_chase_min,
+      observe_min = excluded.observe_min,
+      observe_max = excluded.observe_max,
+      reasonable_min = excluded.reasonable_min,
+      reasonable_max = excluded.reasonable_max,
+      safe_min = excluded.safe_min,
+      safe_max = excluded.safe_max,
+      bargain_min = excluded.bargain_min,
+      bargain_max = excluded.bargain_max,
+      stop_loss = excluded.stop_loss,
+      reduce_min = excluded.reduce_min,
+      reduce_max = excluded.reduce_max,
+      sell_min = excluded.sell_min,
+      sell_max = excluded.sell_max,
+      keep_min = excluded.keep_min,
+      conclusion = excluded.conclusion,
+      analysis_markdown = excluded.analysis_markdown,
+      analysis_json = excluded.analysis_json,
+      analysis_updated_at = excluded.analysis_updated_at,
+      updated_at = CURRENT_TIMESTAMP
+  `).bind(
+    id,
+    data.asset_type,
+    data.name,
+    normalizeCode(data.code),
+    data.market,
+    data.enabled ? 1 : 0,
+    data.sort_order,
+    data.current_price ?? null,
+    priceStatus,
+    data.no_chase_min ?? null,
+    data.observe_min ?? null,
+    data.observe_max ?? null,
+    data.reasonable_min ?? null,
+    data.reasonable_max ?? null,
+    data.safe_min ?? null,
+    data.safe_max ?? null,
+    data.bargain_min ?? null,
+    data.bargain_max ?? null,
+    data.stop_loss ?? null,
+    data.reduce_min ?? null,
+    data.reduce_max ?? null,
+    data.sell_min ?? null,
+    data.sell_max ?? null,
+    data.keep_min ?? null,
+    data.conclusion,
+    data.analysis_markdown,
+    data.analysis_json,
+    data.analysis_updated_at ?? null
+  ).run();
+}
+
+function formatFoundationAsset(asset: FoundationAsset, includeAnalysis = false) {
+  const current = asset.current_price;
+  const levels = {
+    no_chase: rangeText(asset.no_chase_min, null, "≥"),
+    observe: rangeText(asset.observe_min, asset.observe_max),
+    reasonable: rangeText(asset.reasonable_min, asset.reasonable_max),
+    safe: rangeText(asset.safe_min, asset.safe_max),
+    bargain: rangeText(asset.bargain_min, asset.bargain_max),
+    stop_loss: rangeText(null, asset.stop_loss, "≤"),
+    reduce: rangeText(asset.reduce_min, asset.reduce_max),
+    sell: rangeText(asset.sell_min, asset.sell_max),
+    keep: rangeText(asset.keep_min, null, "≥")
+  };
+  const hits = current === null ? [] : [
+    hitAbove("no_chase", current, asset.no_chase_min),
+    hitRange("observe", current, asset.observe_min, asset.observe_max),
+    hitRange("reasonable", current, asset.reasonable_min, asset.reasonable_max),
+    hitRange("safe", current, asset.safe_min, asset.safe_max),
+    hitRange("bargain", current, asset.bargain_min, asset.bargain_max),
+    hitBelow("stop_loss", current, asset.stop_loss),
+    hitRange("reduce", current, asset.reduce_min, asset.reduce_max),
+    hitRange("sell", current, asset.sell_min, asset.sell_max),
+    hitAbove("keep", current, asset.keep_min)
+  ].filter(Boolean) as string[];
+  const base = {
+    id: asset.id,
+    asset_type: asset.asset_type,
+    name: asset.name,
+    code: asset.code,
+    market: asset.market,
+    enabled: Boolean(asset.enabled),
+    sort_order: asset.sort_order,
+    current_price: current,
+    price_source: asset.price_source,
+    price_status: asset.price_status,
+    price_error: asset.price_error,
+    price_updated_at: asset.price_updated_at,
+    conclusion: asset.conclusion,
+    analysis_updated_at: asset.analysis_updated_at,
+    levels,
+    hit_fields: hits
+  };
+  return includeAnalysis ? { ...base, raw: asset, analysis_markdown: asset.analysis_markdown, analysis_json: safeJson(asset.analysis_json, {}) } : base;
+}
+
+async function refreshFoundationPrices(db: D1Database) {
+  const assets = await listFoundationAssets(db, true);
+  await Promise.allSettled(assets.map(async (asset) => {
+    const quote = await fetchFoundationQuote(asset);
+    if (quote.ok) {
+      await db.prepare(`
+        UPDATE foundation_assets SET current_price = ?, price_source = ?, price_status = 'ok', price_error = NULL,
+        price_updated_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+      `).bind(quote.price, quote.source, asset.id).run();
+    } else {
+      await db.prepare(`
+        UPDATE foundation_assets SET price_status = 'failed', price_error = ?, price_updated_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP WHERE id = ?
+      `).bind(quote.error.slice(0, 240), asset.id).run();
+    }
+  }));
+}
+
+async function fetchFoundationQuote(asset: FoundationAsset): Promise<{ ok: true; price: number; source: string } | { ok: false; error: string }> {
+  try {
+    if (asset.market.toLowerCase().includes("btc") || asset.code.toUpperCase().includes("BTC")) {
+      const response = await fetch("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", { headers: { "User-Agent": "manfu-dashboard/0.1" } });
+      if (!response.ok) throw new Error(`Binance HTTP ${response.status}`);
+      const json = await response.json() as { price?: string };
+      const price = Number(json.price);
+      if (!Number.isFinite(price)) throw new Error("Binance price parse failed");
+      return { ok: true, price, source: "Binance BTCUSDT" };
+    }
+    const symbol = toTencentSymbol(asset.code);
+    if (!symbol) return { ok: false, error: "暂不支持该标的自动报价" };
+    const response = await fetch(`https://qt.gtimg.cn/q=${symbol}`, { headers: { "User-Agent": "Mozilla/5.0 manfu-dashboard/0.1" } });
+    if (!response.ok) throw new Error(`腾讯行情 HTTP ${response.status}`);
+    const text = await response.text();
+    const fields = text.split("\"")[1]?.split("~") ?? [];
+    const price = Number(fields[3]);
+    if (!Number.isFinite(price) || price <= 0) throw new Error("腾讯行情价格解析失败");
+    return { ok: true, price, source: "腾讯证券实时行情" };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function toTencentSymbol(code: string) {
+  const digits = normalizeCode(code).replace(/\D/g, "");
+  if (!digits) return "";
+  if (/^(6|5|9)/.test(digits)) return `sh${digits}`;
+  if (/^(0|1|2|3)/.test(digits)) return `sz${digits}`;
+  return "";
+}
+
+function slugifyAsset(code: string, market: string) {
+  return `${market.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/gi, "-")}-${normalizeCode(code).toLowerCase().replace(/[^a-z0-9]+/gi, "-")}`.replace(/^-+|-+$/g, "");
+}
+
+function normalizeCode(code: string) {
+  return code.trim().toUpperCase();
+}
+
+function rangeText(min: number | null, max: number | null, mode: "range" | "≥" | "≤" = "range") {
+  if (mode === "≥") return min === null ? "--" : `≥ ${formatNumber(min)}`;
+  if (mode === "≤") return max === null ? "--" : `≤ ${formatNumber(max)}`;
+  if (min !== null && max !== null) return `${formatNumber(min)} - ${formatNumber(max)}`;
+  if (min !== null) return `≥ ${formatNumber(min)}`;
+  if (max !== null) return `≤ ${formatNumber(max)}`;
+  return "--";
+}
+
+function formatNumber(value: number) {
+  return Number.isInteger(value) ? String(value) : value.toFixed(value >= 1000 ? 0 : 2).replace(/\.?0+$/g, "");
+}
+
+function hitRange(key: string, price: number, min: number | null, max: number | null) {
+  if (min === null || max === null) return null;
+  return price >= min && price <= max ? key : null;
+}
+
+function hitAbove(key: string, price: number, min: number | null) {
+  return min !== null && price >= min ? key : null;
+}
+
+function hitBelow(key: string, price: number, max: number | null) {
+  return max !== null && price <= max ? key : null;
 }
 
 async function getBtcRealtime(db: D1Database) {
@@ -575,7 +1062,8 @@ function parseCookie(header: string) {
 }
 
 function setCookie(c: AppContext, name: string, value: string, expiresAt: string) {
-  c.header("Set-Cookie", `${name}=${value}; HttpOnly; Secure; SameSite=Lax; Path=/; Expires=${new Date(expiresAt).toUTCString()}`);
+  const secure = new URL(c.req.url).protocol === "https:" ? " Secure;" : "";
+  c.header("Set-Cookie", `${name}=${value}; HttpOnly;${secure} SameSite=Lax; Path=/; Expires=${new Date(expiresAt).toUTCString()}`);
 }
 
 function safeJson<T>(text: string, fallback: T): T {
