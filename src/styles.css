@@ -961,6 +961,122 @@ tbody tr:last-child td {
   justify-content: space-between;
 }
 
+.admin-asset-group {
+  display: grid;
+  gap: 6px;
+  padding-top: 6px;
+}
+
+.admin-asset-group + .admin-asset-group {
+  margin-top: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.admin-asset-group-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 4px 2px;
+  color: oklch(0.4 0.055 235);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.admin-asset-group-title small {
+  min-width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  color: oklch(0.42 0.08 190);
+  background: oklch(0.94 0.04 185);
+}
+
+.admin-asset-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+  gap: 6px;
+  border-radius: 8px;
+}
+
+.admin-asset-row.active {
+  background: linear-gradient(135deg, oklch(0.96 0.05 176), oklch(0.98 0.02 222));
+  box-shadow: inset 0 0 0 1px oklch(0.78 0.07 180);
+}
+
+.list-panel .admin-asset-main {
+  min-height: 52px;
+  padding: 8px 10px;
+  justify-content: space-between;
+  background: transparent;
+  box-shadow: none;
+}
+
+.list-panel .admin-asset-main:hover {
+  background: oklch(0.985 0.018 100 / 0.9);
+}
+
+.admin-asset-main span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  text-align: left;
+}
+
+.admin-asset-main strong,
+.admin-asset-main em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-asset-main em {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.sort-actions {
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+  gap: 4px;
+  padding: 4px 4px 4px 0;
+}
+
+.list-panel .sort-button {
+  width: 32px;
+  min-height: 0;
+  height: 22px;
+  padding: 0;
+  justify-content: center;
+  color: oklch(0.4 0.06 230);
+  background: oklch(1 0 0 / 0.72);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.list-panel .sort-button:hover:not(:disabled) {
+  color: oklch(0.28 0.09 188);
+  background: oklch(0.95 0.05 178);
+}
+
+.list-panel .sort-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
+.admin-asset-empty {
+  padding: 10px 12px;
+  border-radius: 8px;
+  color: var(--muted);
+  background: oklch(0.98 0.01 230);
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .edit-panel {
   padding: 18px;
   display: grid;

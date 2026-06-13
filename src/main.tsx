@@ -4,7 +4,9 @@ import { createRoot } from "react-dom/client";
 import {
   Activity,
   AlertTriangle,
+  ArrowDown,
   ArrowLeft,
+  ArrowUp,
   BarChart3,
   Bitcoin,
   CheckCircle2,
@@ -170,6 +172,12 @@ type FoundationSettings = { refresh_seconds: number };
 type AdminUser = User & { disabled: number; created_at: string };
 type Page = "foundation" | "foundation-detail" | "dashboard" | "btc" | "admin";
 
+const foundationAdminSections: Array<{ key: AssetType; title: string }> = [
+  { key: "stock", title: "股票" },
+  { key: "etf", title: "ETF" },
+  { key: "other", title: "其他" }
+];
+
 const levelMeta = [
   ["no_chase", "禁追", "绝对不追价区间，高于该位置不新买"],
   ["observe", "观察", "可以开始跟踪，但不急着买"],
@@ -242,7 +250,7 @@ function App() {
           <CircleGauge size={28} />
           <div>
             <strong>慢富</strong>
-            <span>安全边际工作台</span>
+            <span>在K线里修个念头通达</span>
           </div>
         </div>
         <nav>
@@ -795,6 +803,36 @@ function FoundationAdmin() {
 
   useEffect(() => { load(); }, []);
 
+  const groupedAssets = useMemo(() => {
+    return foundationAdminSections.map((section) => ({
+      ...section,
+      items: assets
+        .filter((asset) => asset.asset_type === section.key)
+        .sort((left, right) => left.sort_order - right.sort_order || left.name.localeCompare(right.name, "zh-CN") || left.code.localeCompare(right.code))
+    }));
+  }, [assets]);
+
+  async function moveAsset(asset: FoundationAsset, direction: "up" | "down") {
+    const section = groupedAssets.find((group) => group.key === asset.asset_type);
+    if (!section) return;
+    const currentIndex = section.items.findIndex((item) => item.id === asset.id);
+    const targetIndex = direction === "up" ? currentIndex - 1 : currentIndex + 1;
+    if (currentIndex < 0 || targetIndex < 0 || targetIndex >= section.items.length) return;
+
+    const reordered = [...section.items];
+    [reordered[currentIndex], reordered[targetIndex]] = [reordered[targetIndex], reordered[currentIndex]];
+    await Promise.all(reordered.map((item, index) => {
+      const raw = item.raw;
+      if (!raw) return Promise.resolve();
+      return api(`/api/admin/foundation/assets/${item.id}`, {
+        method: "PUT",
+        body: JSON.stringify(foundationPayload({ ...raw, sort_order: (index + 1) * 10 }))
+      });
+    }));
+    setMessage("排序已更新");
+    await load();
+  }
+
   async function save(event: FormEvent) {
     event.preventDefault();
     const payload = foundationPayload(selected);
@@ -824,11 +862,29 @@ function FoundationAdmin() {
         <button className={!selected.id ? "active" : ""} onClick={() => setSelected({ ...blankFoundationRaw, sort_order: assets.length + 1 })}>
           <Plus size={15} /> 新增标的
         </button>
-        {assets.map((item) => (
-          <button key={item.id} className={selected.id === item.id ? "active" : ""} onClick={() => setSelected(item.raw ?? blankFoundationRaw)}>
-            <span>{item.name}</span>
-            <ConclusionPill value={item.conclusion} />
-          </button>
+        {groupedAssets.map((section) => (
+          <div className="admin-asset-group" key={section.key}>
+            <div className="admin-asset-group-title">
+              <span>{section.title}</span>
+              <small>{section.items.length}</small>
+            </div>
+            {section.items.length === 0 && <div className="admin-asset-empty">暂无标的</div>}
+            {section.items.map((item, index) => (
+              <div className={`admin-asset-row ${selected.id === item.id ? "active" : ""}`} key={item.id}>
+                <button type="button" className="admin-asset-main" onClick={() => setSelected(item.raw ?? blankFoundationRaw)}>
+                  <span>
+                    <strong>{item.name}</strong>
+                    <em>{item.code}</em>
+                  </span>
+                  <ConclusionPill value={item.conclusion} />
+                </button>
+                <div className="sort-actions" aria-label={`${item.name} 排序`}>
+                  <button type="button" className="sort-button" title="上移" disabled={index === 0} onClick={() => moveAsset(item, "up")}><ArrowUp size={14} /></button>
+                  <button type="button" className="sort-button" title="下移" disabled={index === section.items.length - 1} onClick={() => moveAsset(item, "down")}><ArrowDown size={14} /></button>
+                </div>
+              </div>
+            ))}
+          </div>
         ))}
       </div>
       <div className="admin-stack">
