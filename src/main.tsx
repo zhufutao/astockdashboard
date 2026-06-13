@@ -150,6 +150,7 @@ type FoundationAsset = {
   name: string;
   code: string;
   market: string;
+  style_tag: string;
   enabled: boolean;
   sort_order: number;
   current_price: number | null;
@@ -421,7 +422,10 @@ function FoundationRow({ asset, index, onOpen }: { asset: FoundationAsset; index
   return (
     <tr className="click-row" onClick={() => onOpen(asset.id)} tabIndex={0} onKeyDown={(event) => event.key === "Enter" && onOpen(asset.id)}>
       <td>{index}</td>
-      <td><strong>{asset.name}</strong><span className="muted-inline">{asset.market}</span></td>
+      <td>
+        <strong>{asset.name}</strong>
+        <span className="asset-tags"><span>{asset.market}</span><em>{asset.style_tag}</em></span>
+      </td>
       <td className="mono">{asset.code}</td>
       <td className={asset.price_status === "failed" ? "quote-cell failed" : "quote-cell"}>
         <strong>{priceText(asset.current_price)}</strong>
@@ -490,21 +494,128 @@ function FoundationDetailPage({ id, onBack }: { id: string; onBack: () => void }
 }
 
 function MarkdownView({ text }: { text: string }) {
+  const blocks = parseMarkdownBlocks(text);
   return (
     <div className="markdown-view">
-      {text.split(/\n{2,}/).map((block, index) => {
-        const trimmed = block.trim();
-        if (!trimmed) return null;
-        if (trimmed.startsWith("### ")) return <h3 key={index}>{trimmed.slice(4)}</h3>;
-        if (trimmed.startsWith("## ")) return <h2 key={index}>{trimmed.slice(3)}</h2>;
-        if (trimmed.startsWith("# ")) return <h1 key={index}>{trimmed.slice(2)}</h1>;
-        if (trimmed.includes("\n- ")) {
-          return <ul key={index}>{trimmed.split("\n").map((line) => <li key={line}>{line.replace(/^- /, "")}</li>)}</ul>;
+      {blocks.map((block, index) => {
+        if (block.type === "heading") {
+          const Tag = (`h${block.level}` as "h1" | "h2" | "h3");
+          return <Tag key={index}>{block.text}</Tag>;
         }
-        return <p key={index}>{trimmed}</p>;
+        if (block.type === "list") {
+          return <ul key={index}>{block.items.map((item, itemIndex) => <li key={`${itemIndex}-${item}`}>{item}</li>)}</ul>;
+        }
+        if (block.type === "table") {
+          return (
+            <div className="markdown-table-wrap" key={index}>
+              <table className="markdown-table">
+                <thead>
+                  <tr>{block.headers.map((cell, cellIndex) => <th key={`${cellIndex}-${cell}`}>{cell}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {block.rows.map((row, rowIndex) => (
+                    <tr key={rowIndex}>{row.map((cell, cellIndex) => <td key={`${rowIndex}-${cellIndex}`}>{cell}</td>)}</tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
+        }
+        return <p key={index}>{block.text}</p>;
       })}
     </div>
   );
+}
+
+type MarkdownBlock =
+  | { type: "heading"; level: 1 | 2 | 3; text: string }
+  | { type: "list"; items: string[] }
+  | { type: "table"; headers: string[]; rows: string[][] }
+  | { type: "paragraph"; text: string };
+
+function parseMarkdownBlocks(text: string): MarkdownBlock[] {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const blocks: MarkdownBlock[] = [];
+  let paragraph: string[] = [];
+
+  const flushParagraph = () => {
+    const content = paragraph.join("\n").trim();
+    if (content) blocks.push({ type: "paragraph", text: content });
+    paragraph = [];
+  };
+
+  for (let index = 0; index < lines.length;) {
+    const line = lines[index].trim();
+    if (!line) {
+      flushParagraph();
+      index += 1;
+      continue;
+    }
+    if (line.startsWith("### ")) {
+      flushParagraph();
+      blocks.push({ type: "heading", level: 3, text: line.slice(4).trim() });
+      index += 1;
+      continue;
+    }
+    if (line.startsWith("## ")) {
+      flushParagraph();
+      blocks.push({ type: "heading", level: 2, text: line.slice(3).trim() });
+      index += 1;
+      continue;
+    }
+    if (line.startsWith("# ")) {
+      flushParagraph();
+      blocks.push({ type: "heading", level: 1, text: line.slice(2).trim() });
+      index += 1;
+      continue;
+    }
+    if (isTableStart(lines, index)) {
+      flushParagraph();
+      const tableLines: string[] = [];
+      while (index < lines.length && isPipeRow(lines[index])) {
+        tableLines.push(lines[index].trim());
+        index += 1;
+      }
+      const [headerLine, , ...bodyLines] = tableLines;
+      blocks.push({
+        type: "table",
+        headers: splitTableRow(headerLine),
+        rows: bodyLines.filter((row) => !isSeparatorRow(row)).map(splitTableRow)
+      });
+      continue;
+    }
+    if (line.startsWith("- ")) {
+      flushParagraph();
+      const items: string[] = [];
+      while (index < lines.length && lines[index].trim().startsWith("- ")) {
+        items.push(lines[index].trim().slice(2).trim());
+        index += 1;
+      }
+      blocks.push({ type: "list", items });
+      continue;
+    }
+    paragraph.push(line);
+    index += 1;
+  }
+  flushParagraph();
+  return blocks;
+}
+
+function isTableStart(lines: string[], index: number) {
+  return isPipeRow(lines[index]) && isSeparatorRow(lines[index + 1] ?? "");
+}
+
+function isPipeRow(line: string) {
+  const trimmed = line.trim();
+  return trimmed.startsWith("|") && trimmed.endsWith("|") && trimmed.includes("|");
+}
+
+function isSeparatorRow(line: string) {
+  return /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(line.trim());
+}
+
+function splitTableRow(line: string) {
+  return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
 }
 
 function DashboardPage() {

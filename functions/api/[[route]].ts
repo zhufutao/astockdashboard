@@ -660,6 +660,7 @@ async function upsertFoundationAsset(db: D1Database, id: string, data: z.infer<t
 
 function formatFoundationAsset(asset: FoundationAsset, includeAnalysis = false) {
   const current = asset.current_price;
+  const analysisJson = safeJson<Record<string, unknown>>(asset.analysis_json, {});
   const levels = {
     no_chase: rangeText(asset.no_chase_min, null, "≥"),
     observe: rangeText(asset.observe_min, asset.observe_max),
@@ -697,10 +698,39 @@ function formatFoundationAsset(asset: FoundationAsset, includeAnalysis = false) 
     price_updated_at: asset.price_updated_at,
     conclusion: asset.conclusion,
     analysis_updated_at: asset.analysis_updated_at,
+    style_tag: inferAssetStyle(asset, analysisJson),
     levels,
     hit_fields: hits
   };
-  return includeAnalysis ? { ...base, raw: asset, analysis_markdown: asset.analysis_markdown, analysis_json: safeJson(asset.analysis_json, {}) } : base;
+  return includeAnalysis ? { ...base, raw: asset, analysis_markdown: asset.analysis_markdown, analysis_json: analysisJson } : base;
+}
+
+function inferAssetStyle(asset: FoundationAsset, analysisJson: Record<string, unknown>) {
+  const explicit = firstString(
+    analysisJson.asset_subtype,
+    analysisJson.asset_style,
+    analysisJson.valuation_method,
+    analysisJson.price_band_method
+  );
+  const text = `${explicit} ${asset.name} ${asset.market} ${asset.analysis_markdown}`.toLowerCase();
+  if (/qdii|港股|美股|海外|中概|互联网/.test(text)) return asset.asset_type === "etf" ? "QDII/互联网" : "港美/中概";
+  if (/主题|粮食|农业|种业|农化|commodity|sector/.test(text)) return asset.asset_type === "etf" ? "主题ETF" : "主题";
+  if (/宽基|沪深300|中证500|创业板|科创|上证|broad/.test(text)) return "宽基ETF";
+  if (/周期|煤|硅|金属|化工|资源|cyclical|resource/.test(text)) return "周期/资源";
+  if (/成长|科技|growth|technology|ai|软件|半导体/.test(text)) return "成长";
+  if (/银行|保险|券商|bank|insurance|brokerage/.test(text)) return "金融";
+  if (/高股息|红利|公用事业|utility|dividend/.test(text)) return "高股息";
+  if (/制造|设备|电网|订单|manufacturing|equipment/.test(text)) return "制造/设备";
+  if (asset.asset_type === "etf") return "ETF";
+  if (asset.asset_type === "stock") return "待分类";
+  return "其他";
+}
+
+function firstString(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return "";
 }
 
 async function refreshFoundationPrices(db: D1Database) {
