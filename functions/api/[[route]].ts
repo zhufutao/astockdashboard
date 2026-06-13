@@ -713,14 +713,14 @@ function inferAssetStyle(asset: FoundationAsset, analysisJson: Record<string, un
     analysisJson.price_band_method
   );
   const text = `${explicit} ${asset.name} ${asset.market} ${asset.analysis_markdown}`.toLowerCase();
-  if (/qdii|港股|美股|海外|中概|互联网/.test(text)) return asset.asset_type === "etf" ? "QDII/互联网" : "港美/中概";
+  if (/周期|煤|硅|金属|化工|资源|cyclical|resource/.test(text)) return "周期/资源";
+  if (/制造|设备|电网|订单|manufacturing|equipment/.test(text)) return "制造/设备";
+  if ((asset.asset_type === "etf" || /港股|美股|qdii/i.test(asset.market)) && /qdii|港股|美股|海外|中概|互联网/.test(text)) return asset.asset_type === "etf" ? "QDII/互联网" : "港美/中概";
   if (/主题|粮食|农业|种业|农化|commodity|sector/.test(text)) return asset.asset_type === "etf" ? "主题ETF" : "主题";
   if (/宽基|沪深300|中证500|创业板|科创|上证|broad/.test(text)) return "宽基ETF";
-  if (/周期|煤|硅|金属|化工|资源|cyclical|resource/.test(text)) return "周期/资源";
   if (/成长|科技|growth|technology|ai|软件|半导体/.test(text)) return "成长";
   if (/银行|保险|券商|bank|insurance|brokerage/.test(text)) return "金融";
   if (/高股息|红利|公用事业|utility|dividend/.test(text)) return "高股息";
-  if (/制造|设备|电网|订单|manufacturing|equipment/.test(text)) return "制造/设备";
   if (asset.asset_type === "etf") return "ETF";
   if (asset.asset_type === "stock") return "待分类";
   return "其他";
