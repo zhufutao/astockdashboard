@@ -168,7 +168,24 @@ type FoundationAsset = {
   analysis_markdown?: string;
 };
 
-type FoundationSettings = { refresh_seconds: number };
+type FoundationSettings = {
+  refresh_seconds: number;
+  trading_refresh_seconds: number;
+  offhours_refresh_seconds: number;
+  active_refresh_seconds?: number;
+  is_trading_time?: boolean;
+};
+type FoundationHitSummaryAsset = Pick<FoundationAsset, "id" | "code" | "name" | "current_price">;
+type FoundationHitSummaryGroup = {
+  key: keyof FoundationLevels;
+  label: string;
+  count: number;
+  assets: FoundationHitSummaryAsset[];
+};
+type FoundationHitSummary = {
+  buy: FoundationHitSummaryGroup[];
+  sell: FoundationHitSummaryGroup[];
+};
 type AdminUser = User & { disabled: number; created_at: string };
 type Page = "foundation" | "foundation-detail" | "dashboard" | "btc" | "admin";
 
@@ -192,6 +209,14 @@ const levelMeta = [
 
 const buyKeys = ["no_chase", "observe", "reasonable", "safe", "bargain"] as const;
 const sellKeys = ["stop_loss", "reduce", "sell", "keep"] as const;
+const emptyHitSummary: FoundationHitSummary = { buy: [], sell: [] };
+const defaultFoundationSettings: FoundationSettings = {
+  refresh_seconds: 300,
+  trading_refresh_seconds: 30,
+  offhours_refresh_seconds: 300,
+  active_refresh_seconds: 300,
+  is_trading_time: false
+};
 
 const blankFoundationRaw: FoundationRaw = {
   id: "",
@@ -336,16 +361,18 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
 
 function FoundationBoard({ onOpen }: { onOpen: (id: string) => void }) {
   const [assets, setAssets] = useState<FoundationAsset[]>([]);
-  const [settings, setSettings] = useState<FoundationSettings>({ refresh_seconds: 15 });
+  const [settings, setSettings] = useState<FoundationSettings>(defaultFoundationSettings);
+  const [hitSummary, setHitSummary] = useState<FoundationHitSummary>(emptyHitSummary);
   const [error, setError] = useState("");
   const [refreshing, setRefreshing] = useState(false);
 
   async function load(refreshPrices = false) {
     setRefreshing(refreshPrices);
     try {
-      const data = await api<{ settings: FoundationSettings; assets: FoundationAsset[] }>(refreshPrices ? "/api/foundation/prices" : "/api/foundation", { method: refreshPrices ? "POST" : "GET" });
+      const data = await api<{ settings: FoundationSettings; assets: FoundationAsset[]; hit_summary?: FoundationHitSummary }>(refreshPrices ? "/api/foundation/prices" : "/api/foundation", { method: refreshPrices ? "POST" : "GET" });
       setAssets(data.assets);
       setSettings(data.settings);
+      setHitSummary(data.hit_summary ?? buildClientHitSummary(data.assets));
       setError("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "读取失败");
@@ -356,16 +383,21 @@ function FoundationBoard({ onOpen }: { onOpen: (id: string) => void }) {
 
   useEffect(() => { load(); }, []);
   useEffect(() => {
-    const intervalMs = Math.max(5, settings.refresh_seconds) * 1000;
+    const activeSeconds = settings.active_refresh_seconds ?? settings.refresh_seconds;
+    const intervalMs = Math.max(5, activeSeconds) * 1000;
     const timer = window.setInterval(() => load(true), intervalMs);
     return () => window.clearInterval(timer);
-  }, [settings.refresh_seconds]);
+  }, [settings.active_refresh_seconds, settings.refresh_seconds]);
 
   const grouped = useMemo(() => ({
     stock: assets.filter((item) => item.asset_type === "stock"),
     etf: assets.filter((item) => item.asset_type === "etf"),
     other: assets.filter((item) => item.asset_type === "other")
   }), [assets]);
+  const buyHitCount = hitSummary.buy.reduce((sum, item) => sum + item.count, 0);
+  const sellHitCount = hitSummary.sell.reduce((sum, item) => sum + item.count, 0);
+  const activeRefresh = settings.active_refresh_seconds ?? settings.refresh_seconds;
+  const refreshLabel = settings.is_trading_time ? "交易时段刷新" : "非交易刷新";
 
   return (
     <section className="page">
@@ -377,14 +409,62 @@ function FoundationBoard({ onOpen }: { onOpen: (id: string) => void }) {
       />
       <div className="hero-grid foundation-summary">
         <Metric label="跟踪标的" value={assets.length} icon={<Database size={18} />} />
-        <Metric label="命中买入区" value={assets.filter((item) => item.hit_fields.some((key) => ["reasonable", "safe", "bargain"].includes(key))).length} icon={<CheckCircle2 size={18} />} />
-        <Metric label="卖出/风控提醒" value={assets.filter((item) => item.hit_fields.some((key) => ["stop_loss", "reduce", "sell", "keep", "no_chase"].includes(key))).length} icon={<TrendingDown size={18} />} />
-        <Metric label="刷新间隔" value={`${settings.refresh_seconds}s`} icon={<Activity size={18} />} />
+        <Metric label="命中买入区" value={buyHitCount} icon={<CheckCircle2 size={18} />} />
+        <Metric label="卖出/风控提醒" value={sellHitCount} icon={<TrendingDown size={18} />} />
+        <Metric label={refreshLabel} value={`${activeRefresh}s`} icon={<Activity size={18} />} />
       </div>
+      <OpportunitySummary summary={hitSummary} />
       {error && <p className="error-text" role="alert">{error}</p>}
       <FoundationSection title="股票" assets={grouped.stock} onOpen={onOpen} />
       <FoundationSection title="ETF" assets={grouped.etf} onOpen={onOpen} />
       <FoundationSection title="其他" assets={grouped.other} onOpen={onOpen} />
+    </section>
+  );
+}
+
+function buildClientHitSummary(assets: FoundationAsset[]): FoundationHitSummary {
+  const labels: Record<"reasonable" | "safe" | "bargain" | "stop_loss" | "reduce" | "sell" | "keep", string> = {
+    reasonable: "合理区",
+    safe: "安全区",
+    bargain: "捡漏区",
+    stop_loss: "止损位",
+    reduce: "减仓区",
+    sell: "卖出区",
+    keep: "底仓区"
+  };
+  const serialize = (key: keyof typeof labels): FoundationHitSummaryGroup => {
+    const matched = assets
+      .filter((asset) => asset.hit_fields.includes(key))
+      .map(({ id, code, name, current_price }) => ({ id, code, name, current_price }));
+    return { key, label: labels[key], count: matched.length, assets: matched };
+  };
+  return {
+    buy: (["reasonable", "safe", "bargain"] as const).map(serialize),
+    sell: (["stop_loss", "reduce", "sell", "keep"] as const).map(serialize)
+  };
+}
+
+function OpportunitySummary({ summary }: { summary: FoundationHitSummary }) {
+  const groups = [...summary.buy.map((item) => ({ ...item, side: "buy" as const })), ...summary.sell.map((item) => ({ ...item, side: "sell" as const }))];
+  const activeGroups = groups.filter((item) => item.count > 0);
+  return (
+    <section className="opportunity-summary">
+      <div className="section-head">
+        <h2>关键区间命中</h2>
+        <span>{activeGroups.length ? `${activeGroups.reduce((sum, item) => sum + item.count, 0)} 条提醒` : "等待更好的价位"}</span>
+      </div>
+      {activeGroups.length === 0 ? (
+        <p className="opportunity-empty">当前没有标的命中买入或卖出关键区间。</p>
+      ) : (
+        <div className="opportunity-list">
+          {activeGroups.map((group) => (
+            <div className={`opportunity-item ${group.side}`} key={group.key}>
+              <strong>当前有 {group.count} 个标的命中{group.label}：</strong>
+              <span>{group.assets.map((asset) => `${asset.code}-${asset.name}`).join("，")}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </section>
   );
 }
@@ -787,7 +867,7 @@ function AdminPage() {
 
 function FoundationAdmin() {
   const [assets, setAssets] = useState<FoundationAsset[]>([]);
-  const [settings, setSettings] = useState<FoundationSettings>({ refresh_seconds: 15 });
+  const [settings, setSettings] = useState<FoundationSettings>(defaultFoundationSettings);
   const [selected, setSelected] = useState<FoundationRaw>(blankFoundationRaw);
   const [message, setMessage] = useState("");
 
@@ -852,8 +932,15 @@ function FoundationAdmin() {
 
   async function saveSettings(event: FormEvent) {
     event.preventDefault();
-    await api("/api/admin/foundation/settings", { method: "PUT", body: JSON.stringify({ refresh_seconds: Number(settings.refresh_seconds) }) });
-    setMessage("刷新秒数已保存");
+    await api("/api/admin/foundation/settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        trading_refresh_seconds: Number(settings.trading_refresh_seconds),
+        offhours_refresh_seconds: Number(settings.offhours_refresh_seconds)
+      })
+    });
+    setMessage("刷新配置已保存");
+    await load();
   }
 
   return (
@@ -888,9 +975,10 @@ function FoundationAdmin() {
         ))}
       </div>
       <div className="admin-stack">
-        <form className="edit-panel compact" onSubmit={saveSettings}>
+        <form className="edit-panel compact refresh-settings-form" onSubmit={saveSettings}>
           <h3>刷新配置</h3>
-          <label>前台价格刷新秒数<input type="number" min={5} max={3600} value={settings.refresh_seconds} onChange={(event) => setSettings({ refresh_seconds: Number(event.target.value) })} /></label>
+          <label>交易时段刷新秒数<input type="number" min={5} max={3600} value={settings.trading_refresh_seconds} onChange={(event) => setSettings({ ...settings, trading_refresh_seconds: Number(event.target.value) })} /></label>
+          <label>非交易时段刷新秒数<input type="number" min={30} max={86400} value={settings.offhours_refresh_seconds} onChange={(event) => setSettings({ ...settings, offhours_refresh_seconds: Number(event.target.value) })} /></label>
           <button className="secondary-button"><RefreshCcw size={16} /> 保存配置</button>
         </form>
         <form className="edit-panel" onSubmit={save}>

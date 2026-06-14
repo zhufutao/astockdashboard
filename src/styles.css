@@ -343,6 +343,55 @@ main {
   grid-template-columns: repeat(4, minmax(170px, 1fr));
 }
 
+.opportunity-summary {
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, oklch(0.99 0.012 95 / 0.96), oklch(0.965 0.026 188 / 0.78)),
+    var(--panel);
+  box-shadow: var(--shadow-soft);
+}
+
+.opportunity-list {
+  display: grid;
+  gap: 10px;
+}
+
+.opportunity-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 11px 12px;
+  border-radius: 8px;
+  line-height: 1.55;
+}
+
+.opportunity-item strong {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.opportunity-item span {
+  min-width: 0;
+}
+
+.opportunity-item.buy {
+  color: oklch(0.33 0.088 176);
+  background: oklch(0.955 0.05 176 / 0.72);
+}
+
+.opportunity-item.sell {
+  color: oklch(0.42 0.1 62);
+  background: oklch(0.965 0.05 78 / 0.78);
+}
+
+.opportunity-empty {
+  margin: 0;
+  color: var(--muted);
+  font-weight: 700;
+}
+
 .score-panel,
 .metric,
 .plain-panel,
@@ -1088,6 +1137,14 @@ tbody tr:last-child td {
   align-items: end;
 }
 
+.refresh-settings-form {
+  grid-template-columns: 1fr 1fr auto;
+}
+
+.refresh-settings-form h3 {
+  grid-column: 1 / -1;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
@@ -1184,11 +1241,16 @@ textarea {
 
   .hero-grid,
   .foundation-summary,
+  .refresh-settings-form,
   .detail-hero,
   .strategy-layout,
   .users-layout,
   .admin-layout {
     grid-template-columns: 1fr;
+  }
+
+  .opportunity-item {
+    display: grid;
   }
 }
 

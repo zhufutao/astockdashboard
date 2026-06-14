@@ -77,6 +77,10 @@ type FoundationAsset = {
   updated_at: string;
 };
 
+type FormattedFoundationAsset = ReturnType<typeof formatFoundationAsset>;
+type FoundationHitKey = "reasonable" | "safe" | "bargain" | "stop_loss" | "reduce" | "sell" | "keep";
+type FoundationQuoteResult = { ok: true; price: number; source: string } | { ok: false; error: string };
+
 const app = new Hono<{ Bindings: Env; Variables: { user: User | null } }>().basePath("/api");
 type AppContext = Context<{ Bindings: Env; Variables: { user: User | null } }>;
 
@@ -220,7 +224,8 @@ app.get("/foundation", async (c) => {
   if (user instanceof Response) return user;
   const settings = await getFoundationSettings(c.env.DB);
   const assets = await listFoundationAssets(c.env.DB, true);
-  return c.json({ settings, assets: assets.map((asset) => formatFoundationAsset(asset)) });
+  const formatted = assets.map((asset) => formatFoundationAsset(asset));
+  return c.json({ settings, assets: formatted, hit_summary: buildFoundationHitSummary(formatted) });
 });
 
 app.post("/foundation/prices", async (c) => {
@@ -229,7 +234,8 @@ app.post("/foundation/prices", async (c) => {
   await refreshFoundationPrices(c.env.DB);
   const settings = await getFoundationSettings(c.env.DB);
   const assets = await listFoundationAssets(c.env.DB, true);
-  return c.json({ settings, assets: assets.map((asset) => formatFoundationAsset(asset)) });
+  const formatted = assets.map((asset) => formatFoundationAsset(asset));
+  return c.json({ settings, assets: formatted, hit_summary: buildFoundationHitSummary(formatted) });
 });
 
 app.get("/foundation/assets/:id", async (c) => {
@@ -301,14 +307,23 @@ app.get("/admin/foundation", async (c) => {
 
 app.put(
   "/admin/foundation/settings",
-  zValidator("json", z.object({ refresh_seconds: z.number().int().min(5).max(3600) })),
+  zValidator("json", z.object({
+    refresh_seconds: z.number().int().min(5).max(86400).optional(),
+    trading_refresh_seconds: z.number().int().min(5).max(3600).optional(),
+    offhours_refresh_seconds: z.number().int().min(30).max(86400).optional()
+  })),
   async (c) => {
     const admin = requireAdmin(c);
     if (admin instanceof Response) return admin;
-    const { refresh_seconds } = c.req.valid("json");
-    await c.env.DB.prepare("INSERT INTO foundation_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP")
-      .bind("refresh_seconds", String(refresh_seconds))
-      .run();
+    const data = c.req.valid("json");
+    const tradingRefresh = data.trading_refresh_seconds ?? data.refresh_seconds;
+    const updates: Array<[string, number]> = [];
+    if (tradingRefresh !== undefined) updates.push(["trading_refresh_seconds", tradingRefresh]);
+    if (data.offhours_refresh_seconds !== undefined) updates.push(["offhours_refresh_seconds", data.offhours_refresh_seconds]);
+    if (data.refresh_seconds !== undefined) updates.push(["refresh_seconds", data.refresh_seconds]);
+    await Promise.all(updates.map(([key, value]) => c.env.DB.prepare("INSERT INTO foundation_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP")
+      .bind(key, String(value))
+      .run()));
     return c.json({ ok: true, settings: await getFoundationSettings(c.env.DB) });
   }
 );
@@ -569,14 +584,40 @@ async function ensureFoundationSchema(db: D1Database) {
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       )
     `),
-    db.prepare("INSERT OR IGNORE INTO foundation_settings (key, value) VALUES ('refresh_seconds', '15')")
+    db.prepare("INSERT OR IGNORE INTO foundation_settings (key, value) VALUES ('refresh_seconds', '15')"),
+    db.prepare("INSERT OR IGNORE INTO foundation_settings (key, value) VALUES ('trading_refresh_seconds', '30')"),
+    db.prepare("INSERT OR IGNORE INTO foundation_settings (key, value) VALUES ('offhours_refresh_seconds', '300')")
   ]);
 }
 
 async function getFoundationSettings(db: D1Database) {
   const { results } = await db.prepare("SELECT key, value FROM foundation_settings").all<{ key: string; value: string }>();
   const map = Object.fromEntries(results.map((item) => [item.key, item.value]));
-  return { refresh_seconds: Math.max(5, Number(map.refresh_seconds ?? 15) || 15) };
+  const tradingRefresh = clampSeconds(map.trading_refresh_seconds ?? map.refresh_seconds, 30, 5, 3600);
+  const offhoursRefresh = clampSeconds(map.offhours_refresh_seconds, 300, 30, 86400);
+  const isTradingTime = isAshareTradingTime();
+  const activeRefresh = isTradingTime ? tradingRefresh : offhoursRefresh;
+  return {
+    refresh_seconds: activeRefresh,
+    trading_refresh_seconds: tradingRefresh,
+    offhours_refresh_seconds: offhoursRefresh,
+    active_refresh_seconds: activeRefresh,
+    is_trading_time: isTradingTime
+  };
+}
+
+function clampSeconds(value: string | undefined, fallback: number, min: number, max: number) {
+  const parsed = Number(value ?? fallback);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(parsed)));
+}
+
+function isAshareTradingTime(now = new Date()) {
+  const chinaTime = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Shanghai" }));
+  const day = chinaTime.getDay();
+  if (day === 0 || day === 6) return false;
+  const minutes = chinaTime.getHours() * 60 + chinaTime.getMinutes();
+  return (minutes >= 9 * 60 + 30 && minutes <= 11 * 60 + 30) || (minutes >= 13 * 60 && minutes <= 15 * 60);
 }
 
 async function listFoundationAssets(db: D1Database, enabledOnly: boolean) {
@@ -705,6 +746,33 @@ function formatFoundationAsset(asset: FoundationAsset, includeAnalysis = false) 
   return includeAnalysis ? { ...base, raw: asset, analysis_markdown: asset.analysis_markdown, analysis_json: analysisJson } : base;
 }
 
+function buildFoundationHitSummary(assets: FormattedFoundationAsset[]) {
+  const labels: Record<FoundationHitKey, string> = {
+    reasonable: "合理区",
+    safe: "安全区",
+    bargain: "捡漏区",
+    stop_loss: "止损位",
+    reduce: "减仓区",
+    sell: "卖出区",
+    keep: "底仓区"
+  };
+  const serialize = (key: FoundationHitKey) => {
+    const matched = assets
+      .filter((asset) => asset.hit_fields.includes(key))
+      .map((asset) => ({
+        id: asset.id,
+        code: asset.code,
+        name: asset.name,
+        current_price: asset.current_price
+      }));
+    return { key, label: labels[key], count: matched.length, assets: matched };
+  };
+  return {
+    buy: (["reasonable", "safe", "bargain"] as FoundationHitKey[]).map(serialize),
+    sell: (["stop_loss", "reduce", "sell", "keep"] as FoundationHitKey[]).map(serialize)
+  };
+}
+
 function inferAssetStyle(asset: FoundationAsset, analysisJson: Record<string, unknown>) {
   const explicit = firstString(
     analysisJson.asset_subtype,
@@ -751,8 +819,16 @@ function firstString(...values: unknown[]) {
 
 async function refreshFoundationPrices(db: D1Database) {
   const assets = await listFoundationAssets(db, true);
-  await Promise.allSettled(assets.map(async (asset) => {
-    const quote = await fetchFoundationQuote(asset);
+  const tencentAssets = assets.filter((asset) => canUseTencentQuote(asset));
+  const otherAssets = assets.filter((asset) => !canUseTencentQuote(asset));
+  const tencentQuotes = await fetchTencentQuotes(tencentAssets);
+  await Promise.allSettled([
+    ...tencentAssets.map((asset) => updateFoundationQuote(db, asset, tencentQuotes.get(asset.id) ?? { ok: false as const, error: "Tencent quote missing" })),
+    ...otherAssets.map(async (asset) => updateFoundationQuote(db, asset, await fetchFoundationQuote(asset)))
+  ]);
+}
+
+async function updateFoundationQuote(db: D1Database, asset: FoundationAsset, quote: FoundationQuoteResult) {
     if (quote.ok) {
       await db.prepare(`
         UPDATE foundation_assets SET current_price = ?, price_source = ?, price_status = 'ok', price_error = NULL,
@@ -764,10 +840,9 @@ async function refreshFoundationPrices(db: D1Database) {
         updated_at = CURRENT_TIMESTAMP WHERE id = ?
       `).bind(quote.error.slice(0, 240), asset.id).run();
     }
-  }));
 }
 
-async function fetchFoundationQuote(asset: FoundationAsset): Promise<{ ok: true; price: number; source: string } | { ok: false; error: string }> {
+async function fetchFoundationQuote(asset: FoundationAsset): Promise<FoundationQuoteResult> {
   try {
     if (asset.market.toLowerCase().includes("btc") || asset.code.toUpperCase().includes("BTC")) {
       const response = await fetch("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", { headers: { "User-Agent": "manfu-dashboard/0.1" } });
@@ -789,6 +864,48 @@ async function fetchFoundationQuote(asset: FoundationAsset): Promise<{ ok: true;
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
+}
+
+function canUseTencentQuote(asset: FoundationAsset) {
+  return Boolean(toTencentSymbol(asset.code)) && !asset.market.toLowerCase().includes("btc") && !asset.code.toUpperCase().includes("BTC");
+}
+
+async function fetchTencentQuotes(assets: FoundationAsset[]) {
+  const result = new Map<string, FoundationQuoteResult>();
+  const entries = assets.map((asset) => ({ asset, symbol: toTencentSymbol(asset.code) })).filter((entry) => entry.symbol);
+  for (let index = 0; index < entries.length; index += 80) {
+    const chunk = entries.slice(index, index + 80);
+    try {
+      const response = await fetch(`https://qt.gtimg.cn/q=${chunk.map((entry) => entry.symbol).join(",")}`, { headers: { "User-Agent": "Mozilla/5.0 manfu-dashboard/0.1" } });
+      if (!response.ok) throw new Error(`Tencent quote HTTP ${response.status}`);
+      const text = await response.text();
+      const quotesBySymbol = parseTencentQuoteText(text);
+      for (const { asset, symbol } of chunk) {
+        const quote = quotesBySymbol.get(symbol);
+        result.set(asset.id, quote ?? { ok: false, error: "Tencent quote parse failed" });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      for (const { asset } of chunk) result.set(asset.id, { ok: false, error: message });
+    }
+  }
+  return result;
+}
+
+function parseTencentQuoteText(text: string) {
+  const result = new Map<string, FoundationQuoteResult>();
+  for (const line of text.split(";")) {
+    const symbol = line.match(/v_([^=]+)=/)?.[1];
+    const fields = line.split("\"")[1]?.split("~") ?? [];
+    const price = Number(fields[3]);
+    if (!symbol) continue;
+    if (Number.isFinite(price) && price > 0) {
+      result.set(symbol, { ok: true, price, source: "腾讯证券实时行情" });
+    } else {
+      result.set(symbol, { ok: false, error: "Tencent quote price parse failed" });
+    }
+  }
+  return result;
 }
 
 function toTencentSymbol(code: string) {
