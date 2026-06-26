@@ -1,0 +1,41 @@
+CREATE TABLE IF NOT EXISTS btc_lighthouse_latest (
+  id TEXT PRIMARY KEY,
+  strategy_version TEXT NOT NULL,
+  signal_date TEXT NOT NULL,
+  state TEXT NOT NULL,
+  state_label TEXT NOT NULL,
+  suggested_action TEXT NOT NULL,
+  recommended_position REAL NOT NULL,
+  current_position REAL NOT NULL,
+  price REAL NOT NULL,
+  bottom_score REAL NOT NULL,
+  top_score REAL NOT NULL,
+  bottom_groups INTEGER NOT NULL,
+  trigger_summary TEXT NOT NULL,
+  metrics_json TEXT NOT NULL DEFAULT '{}',
+  state_json TEXT NOT NULL DEFAULT '{}',
+  source_status TEXT NOT NULL CHECK (source_status IN ('ok', 'failed')),
+  source_message TEXT,
+  data_updated_at TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS btc_lighthouse_history (
+  id TEXT PRIMARY KEY,
+  strategy_version TEXT NOT NULL,
+  signal_date TEXT NOT NULL,
+  state TEXT NOT NULL,
+  state_label TEXT NOT NULL,
+  suggested_action TEXT NOT NULL,
+  recommended_position REAL NOT NULL,
+  current_position REAL NOT NULL,
+  price REAL NOT NULL,
+  bottom_score REAL NOT NULL,
+  top_score REAL NOT NULL,
+  bottom_groups INTEGER NOT NULL,
+  trigger_summary TEXT NOT NULL,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(strategy_version, signal_date)
+);

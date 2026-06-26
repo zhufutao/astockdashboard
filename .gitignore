@@ -5,3 +5,5 @@ dist
 .env
 .dev.vars
 *.log
+local-data/
+strategy-lab/browser-profile/

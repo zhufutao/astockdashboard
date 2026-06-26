@@ -1,0 +1,9 @@
+name = "manfu-btc-lighthouse-cron"
+main = "workers/btc-lighthouse-cron.ts"
+compatibility_date = "2026-05-19"
+
+[triggers]
+crons = ["30 0 * * *"]
+
+[vars]
+MANFU_BTC_LIGHTHOUSE_REFRESH_URL = "https://YOUR_MANFU_DOMAIN/api/btc-lighthouse/refresh"
